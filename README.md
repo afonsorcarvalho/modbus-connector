@@ -219,6 +219,37 @@ N4AIB16 @ endereço 1 — 9600 baud (corrente 0-20 mA)
   CH16 reg 0x000F  bruto    0 (0x0000)  =      0.0 V   [voltage]
 ```
 
+### Filtros de leitura e escala (map)
+
+O driver aceita filtros de leitura (bloco de N amostras com média/mediana/média
+aparada, rejeição de outlier, EWMA) e escala por canal (map 4–20 mA → unidade de
+engenharia), reaproveitando a biblioteca genérica `common/`. Veja
+`drivers/MANUAL_N4AIB16.md` §"Filtros de leitura e escala".
+
+| Opção | Padrão | Descrição |
+|---|---|---|
+| `--samples` | `1` | nº de leituras por valor (bloco); `>1` ativa filtro |
+| `--filter` | `mean` | redutor de bloco: `mean`, `median` ou `trimmed` |
+| `--trim` | `0.1` | fração aparada por ponta (só p/ `trimmed`) |
+| `--reject` / `--reject-k` | — / `3.0` | rejeita outliers (MAD) antes de reduzir |
+| `--ewma ALPHA` | — | suavização contínua (0<α≤1); ótimo com `--watch` |
+| `--sample-interval` | `0.0` | espera entre as N amostras (s) |
+| `--stats` | — | mostra `s`, `u = s/√n` e `n` por canal |
+| `--map SPEC` | — | escala por canal, repetível (veja abaixo) |
+| `--map-clamp` | — | limita a saída dos maps à faixa de saída |
+
+```bash
+# 10 amostras, mediana, com incerteza
+python drivers/n4aib16.py -p /dev/ttyUSB0 --samples 10 --filter median --stats
+
+# monitoramento contínuo suavizado
+python drivers/n4aib16.py -p /dev/ttyUSB0 --watch --ewma 0.2
+
+# 4–20 mA -> 0–10 bar nos canais 1,4,6 ; 0–100 % no canal 2
+python drivers/n4aib16.py -p /dev/ttyUSB0 --samples 10 --filter median \
+    --map 1,4,6:4:20:0:10:bar --map 2:4:20:0:100:%
+```
+
 ### Driver N4AIB16 — como biblioteca
 
 ```python

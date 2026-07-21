@@ -214,5 +214,53 @@ python modbus_scanner.py read -p /dev/ttyUSB0 -a 1 --reg 0 --count 16
 - Manual do protocolo Modbus RTU da série N4AIA04 (mesmo protocolo)
 - Demo N4AIA04 com Modbus Poll (YouTube)
 
+## Filtros de leitura e escala (map)
+
+O driver reaproveita a biblioteca genérica `common/` (filtros + escala),
+compartilhável com outros drivers. Pipeline por canal:
+
+    ler bloco → [rejeitar outliers] → reduzir → [EWMA] → [map]
+
+Cada estágio entre colchetes é opcional. Com `--samples 1` (padrão) o
+comportamento é o da leitura única de sempre.
+
+### Filtros de bloco
+- `--samples N` — nº de leituras por valor (padrão 1 = leitura única).
+- `--filter {mean,median,trimmed}` — redutor (padrão mean). Para picos
+  esporádicos, `median` é a escolha robusta.
+- `--trim FRAC` — fração aparada por ponta (só para `trimmed`).
+- `--reject` / `--reject-k K` — rejeita outliers por MAD antes de reduzir.
+  Observação: o MAD não dispara quando mais da metade das amostras é idêntica
+  (comum em contagens inteiras estáveis); nesse caso a rejeição é no-op e a
+  proteção contra picos fica por conta do `--filter median`.
+- `--stats` — mostra desvio-padrão `s`, incerteza `u = s/√n` e `n` por canal.
+
+### EWMA (suavização contínua, com estado)
+- `--ewma ALPHA` (0<α≤1) — filtro exponencial `y = α·x + (1-α)·y_ant`, ideal
+  com `--watch`. α maior segue o sinal mais rápido; α menor filtra mais ruído.
+
+### Map (escala linear por canal)
+- `--map CANAIS:IN_MIN:IN_MAX:OUT_MIN:OUT_MAX[:UNIDADE]` — repetível; cada map
+  define uma escala e a lista de canais que a seguem. Um canal segue no máximo
+  um map; canal sem map continua em mA/V.
+- `--map-clamp` — limita a saída à faixa de saída quando a entrada extrapola.
+
+No JSON de saída, o canal mapeado reporta `value`/`unit` na unidade nova e
+preserva o valor físico (`mA`/`V`) e o `raw` para rastreabilidade.
+
+Exemplos:
+
+    # 10 amostras, mediana, com incerteza
+    python drivers/n4aib16.py -p /dev/ttyUSB0 --samples 10 --filter median --stats
+
+    # monitoramento contínuo suavizado
+    python drivers/n4aib16.py -p /dev/ttyUSB0 --watch --ewma 0.2
+
+    # 4-20 mA -> 0-10 bar nos canais 1,4,6 ; 0-100 % no canal 2
+    python drivers/n4aib16.py -p /dev/ttyUSB0 --samples 10 --filter median \
+        --map 1,4,6:4:20:0:10:bar --map 2:4:20:0:100:%
+
+---
+
 _Documento de referência do projeto `modbus-connector`. Campos marcados
 _(verificar)_ devem ser confirmados contra o módulo físico._
