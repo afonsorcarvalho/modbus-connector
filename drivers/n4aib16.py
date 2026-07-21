@@ -49,6 +49,9 @@ try:
 except ImportError as e:  # pragma: no cover
     sys.exit(f"Não foi possível importar modbus_scanner.py: {e}")
 
+from common.filters import reduce, reject_outliers, block_stats, EWMA  # noqa: E402
+from common.scaling import resolve_maps, parse_map_arg  # noqa: E402
+
 
 # --------------------------------------------------------------------------- #
 # Configuração do módulo
@@ -98,12 +101,14 @@ class N4AIB16:
 
     def __init__(self, port, baud=9600, address=1, function=4,
                  databits=8, parity="N", stopbits=1, timeout=0.3,
-                 current_mode="0-20"):
+                 current_mode="0-20", ewma_alpha=None):
         self.address = address
         # NOTA: o N4AIB16 real testado responde por FC04 (input registers).
         # FC03 (holding) retorna exceção 0x02 (illegal data address).
         self.function = function        # 4 = input (padrão), 3 = holding
         self.current_mode = current_mode
+        self.ewma_alpha = ewma_alpha     # None = EWMA desligado
+        self._ewma = {}                  # canal -> EWMA (sob demanda)
         self._ser = open_serial(port, baud, databits, parity, stopbits, timeout)
 
     # -- baixo nível --------------------------------------------------------- #
@@ -122,34 +127,98 @@ class N4AIB16:
 
     # -- alto nível ---------------------------------------------------------- #
 
-    def read_channels(self):
-        """Retorna uma lista de dicts, um por canal, com valor convertido.
+    def _read_block(self, samples, interval):
+        """Coleta `samples` leituras completas (16 canais cada).
 
-        Cada item: {channel, register, raw, value, unit, type}
+        Uma transação Modbus já lê os 16 canais, então N transações dão N
+        amostras para todos os canais. Descarta falhas de comunicação, relendo
+        até completar N ou estourar `samples` falhas (então RuntimeError).
         """
-        raw = self.read_raw()
+        blocks = []
+        failures = 0
+        while len(blocks) < samples:
+            try:
+                blocks.append(self.read_raw())
+            except RuntimeError:
+                failures += 1
+                if failures > samples:
+                    raise
+                continue
+            if interval and len(blocks) < samples:
+                time.sleep(interval)
+        return blocks
+
+    def _physical(self, raw, channel):
+        """Converte um bruto no valor físico e devolve (valor, unidade, tipo)."""
+        if channel <= CURRENT_CHANNELS:
+            return raw_to_current(raw, self.current_mode), "mA", "current"
+        return raw_to_voltage(raw), "V", "voltage"
+
+    def read_channels(self, samples=1, method="mean", trim=0.1,
+                      reject=False, reject_k=3.0, interval=0.0,
+                      with_stats=False, maps=None):
+        """Lê os canais aplicando o pipeline de filtros e (opcional) map.
+
+        Pipeline por canal: coleta bloco -> [rejeita outliers] -> reduz
+        (mean/median/trimmed) -> [EWMA] -> [map]. Com samples=1 e method="mean"
+        o resultado é idêntico ao comportamento de leitura única.
+
+        Cada item: {channel, register, raw, value, unit, type}. Com `maps`, o
+        canal mapeado reporta value/unit na unidade nova e ganha o campo físico
+        ("mA"/"V"). Com with_stats=True, ganha stats={n, s, u, min, max}.
+        """
+        channel_maps = resolve_maps(maps) if maps else {}
+        blocks = self._read_block(samples, interval)
         result = []
-        for i, value in enumerate(raw):
+        for i in range(NUM_CHANNELS):
             channel = i + 1
-            if channel <= CURRENT_CHANNELS:
-                result.append({
-                    "channel": channel,
-                    "register": BASE_REGISTER + i,
-                    "raw": value,
-                    "value": round(raw_to_current(value, self.current_mode), 3),
-                    "unit": "mA",
-                    "type": "current",
-                })
-            else:
-                result.append({
-                    "channel": channel,
-                    "register": BASE_REGISTER + i,
-                    "raw": value,
-                    "value": round(raw_to_voltage(value), 3),
-                    "unit": "V",
-                    "type": "voltage",
-                })
+            col = [b[i] for b in blocks]
+            if reject:
+                col = reject_outliers(col, reject_k)
+            raw_reduced = reduce(col, method, trim) if len(col) > 1 else col[0]
+
+            phys, phys_unit, ptype = self._physical(raw_reduced, channel)
+            if self.ewma_alpha is not None:
+                ewma = self._ewma.get(channel)
+                if ewma is None:
+                    ewma = EWMA(self.ewma_alpha)
+                    self._ewma[channel] = ewma
+                phys = ewma.update(phys)
+
+            entry = {
+                "channel": channel,
+                "register": BASE_REGISTER + i,
+                "raw": round(raw_reduced) if samples > 1 else raw_reduced,
+                "value": round(phys, 3),
+                "unit": phys_unit,
+                "type": ptype,
+            }
+
+            spec = channel_maps.get(channel)
+            if spec is not None:
+                entry[phys_unit] = round(phys, 4)      # físico preservado
+                entry["value"] = round(spec.apply(phys), 4)
+                entry["unit"] = spec.unit or "eng"
+
+            if with_stats:
+                phys_samples = [self._physical(r, channel)[0] for r in col]
+                st = block_stats(phys_samples)
+                if spec is not None:
+                    slope = abs((spec.out_max - spec.out_min) /
+                                (spec.in_max - spec.in_min))
+                    st = {**st, "s": st["s"] * slope, "u": st["u"] * slope,
+                          "min": spec.apply(st["min"]), "max": spec.apply(st["max"])}
+                entry["stats"] = {
+                    key: (round(v, 5) if isinstance(v, float) else v)
+                    for key, v in st.items() if key in ("n", "s", "u", "min", "max")
+                }
+
+            result.append(entry)
         return result
+
+    def reset_filters(self):
+        """Zera o estado dos filtros EWMA de todos os canais."""
+        self._ewma.clear()
 
     def close(self):
         self._ser.close()
