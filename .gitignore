@@ -1,0 +1,16 @@
+# Ambiente virtual
+.venv-modbus/
+
+# Cache Python
+__pycache__/
+*.py[cod]
+
+# Buffer do remember (histórico de sessão local)
+.remember/
+
+# Scripts temporários de bancada
+scratch_*.py
+
+# Configuração local do Claude Code
+.claude/settings.local.json
+.claude/*.tmp*
