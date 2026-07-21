@@ -256,6 +256,30 @@ def build_parser():
                    help="leitura contínua (polling); Ctrl+C para parar")
     p.add_argument("--interval", type=float, default=1.0,
                    help="intervalo entre leituras no modo --watch (s, padrão 1.0)")
+    # --- filtros de leitura e escala (biblioteca common/) ---
+    p.add_argument("--samples", type=int, default=1,
+                   help="nº de leituras por valor (bloco); >1 ativa filtro")
+    p.add_argument("--filter", choices=("mean", "median", "trimmed"),
+                   default="mean", help="redutor de bloco (padrão mean)")
+    p.add_argument("--trim", type=float, default=0.1,
+                   help="fração aparada em cada ponta (só p/ --filter trimmed)")
+    p.add_argument("--reject", action="store_true",
+                   help="rejeita outliers (MAD) antes de reduzir")
+    p.add_argument("--reject-k", type=float, default=3.0,
+                   help="limiar da rejeição de outlier, em desvios (padrão 3.0)")
+    p.add_argument("--ewma", type=float, default=None, metavar="ALPHA",
+                   help="suavização contínua EWMA (0<ALPHA<=1); bom com --watch")
+    p.add_argument("--sample-interval", type=float, default=0.0,
+                   help="espera entre as N amostras do bloco (s)")
+    p.add_argument("--stats", action="store_true",
+                   help="mostra desvio-padrão s, incerteza u e n por canal")
+    p.add_argument("--map", action="append", default=[], dest="maps",
+                   metavar="SPEC",
+                   help="escala por canal, repetível: "
+                        "CANAIS:IN_MIN:IN_MAX:OUT_MIN:OUT_MAX[:UNIDADE] "
+                        "(ex.: 1,4,6:4:20:0:10:bar)")
+    p.add_argument("--map-clamp", action="store_true",
+                   help="limita a saída dos maps à faixa de saída")
     return p
 
 
@@ -271,26 +295,46 @@ def render_once(dev, args):
                       f"{v}  (0x{v:04X})")
         return
 
-    channels = dev.read_channels()
+    channels = dev.read_channels(
+        samples=args.samples, method=args.filter, trim=args.trim,
+        reject=args.reject, reject_k=args.reject_k,
+        interval=args.sample_interval, with_stats=args.stats,
+        maps=args._map_specs,
+    )
     if args.json:
         print(json.dumps(channels, ensure_ascii=False))
     else:
         print(f"N4AIB16 @ endereço {args.address} — {args.baud} baud "
               f"(corrente {args.current_mode} mA)")
         for ch in channels:
-            print(f"  CH{ch['channel']:<2} "
-                  f"reg 0x{ch['register']:04X}  "
-                  f"bruto {ch['raw']:>4} (0x{ch['raw']:04X})  "
-                  f"= {ch['value']:>8} {ch['unit']}  [{ch['type']}]")
+            line = (f"  CH{ch['channel']:<2} "
+                    f"reg 0x{ch['register']:04X}  "
+                    f"bruto {int(ch['raw']):>4}  "
+                    f"= {ch['value']:>8} {ch['unit']}  [{ch['type']}]")
+            # se houve map, mostra também o valor físico (mA/V) preservado
+            phys_key = "mA" if ch["type"] == "current" else "V"
+            if phys_key in ch:
+                line += f"  ({ch[phys_key]} {phys_key})"
+            if "stats" in ch:
+                st = ch["stats"]
+                line += f"   [n={st['n']} s={st['s']} u={st['u']}]"
+            print(line)
 
 
 def main():
     args = build_parser().parse_args()
     try:
+        args._map_specs = [parse_map_arg(s, clamp=args.map_clamp)
+                           for s in args.maps]
+        resolve_maps(args._map_specs)   # valida canal duplicado cedo
+    except ValueError as e:
+        sys.exit(f"Erro no --map: {e}")
+    try:
         with N4AIB16(args.port, baud=args.baud, address=args.address,
                      function=args.function, databits=args.databits,
                      parity=args.parity, stopbits=args.stopbits,
-                     timeout=args.timeout, current_mode=args.current_mode) as dev:
+                     timeout=args.timeout, current_mode=args.current_mode,
+                     ewma_alpha=args.ewma) as dev:
             if not args.watch:
                 render_once(dev, args)
                 return
