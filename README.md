@@ -1,5 +1,7 @@
 # modbus-connector
 
+[![tests](https://github.com/afonsorcarvalho/modbus-connector/actions/workflows/tests.yml/badge.svg)](https://github.com/afonsorcarvalho/modbus-connector/actions/workflows/tests.yml)
+
 Ferramentas em Python para comunicação **Modbus RTU** sobre RS485/serial, focadas
 em coletores analógicos da linha eletechsup/Electrosup (ex.: **N4AIB16**).
 
