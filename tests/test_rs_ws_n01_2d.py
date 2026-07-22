@@ -4,7 +4,7 @@ from unittest.mock import patch
 from drivers.rs_ws_n01_2d import (
     to_signed16, raw_to_humidity, raw_to_temperature, BAUD_CODES,
     RSWSN012D, REG_ADDRESS, REG_BAUD,
-    crc16 as _crc16,
+    crc16 as _crc16, build_parser,
 )
 from common.scaling import parse_map_arg
 
@@ -204,6 +204,25 @@ class TestConfig(unittest.TestCase):
         fake.set_response(b"\x02\x06\x00\x00\x00\x00\x00\x00")  # eco errado
         with self.assertRaises(RuntimeError):
             dev.set_address(7)
+
+
+class TestCLIParser(unittest.TestCase):
+    def test_defaults(self):
+        args = build_parser().parse_args(["-p", "/dev/ttyUSB1"])
+        self.assertEqual(args.baud, 4800)
+        self.assertEqual(args.address, 1)
+        self.assertEqual(args.function, 3)
+        self.assertFalse(args.show_config)
+
+    def test_config_flags(self):
+        args = build_parser().parse_args(
+            ["-p", "/dev/ttyUSB1", "--set-baud", "9600"])
+        self.assertEqual(args.set_baud, 9600)
+
+    def test_set_baud_choices(self):
+        with self.assertRaises(SystemExit):
+            build_parser().parse_args(
+                ["-p", "/dev/ttyUSB1", "--set-baud", "1200"])
 
 
 if __name__ == "__main__":

@@ -268,3 +268,161 @@ class RSWSN012D:
 
     def __exit__(self, *exc):
         self.close()
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+
+def build_parser():
+    p = argparse.ArgumentParser(
+        description="Driver do sensor de temperatura/umidade RS-WS-N01-2D "
+                    "(Modbus RTU).")
+    p.add_argument("-p", "--port", required=True,
+                   help="porta serial (ex: /dev/ttyUSB1)")
+    p.add_argument("-b", "--baud", type=int, default=4800,
+                   help="baud rate (padrão de fábrica 4800)")
+    p.add_argument("-a", "--address", type=int, default=1,
+                   help="endereço Modbus (padrão 1)")
+    p.add_argument("-f", "--function", type=int, choices=(3, 4), default=3,
+                   help="função de leitura: 3=holding (padrão), 4=input")
+    p.add_argument("--databits", type=int, default=8)
+    p.add_argument("--parity", choices=("N", "E", "O"), default="N")
+    p.add_argument("--stopbits", type=int, choices=(1, 2), default=1)
+    p.add_argument("--timeout", type=float, default=0.3)
+    # --- config (executa e sai) ---
+    p.add_argument("--show-config", action="store_true",
+                   help="lê e mostra endereço e baud atuais do sensor")
+    p.add_argument("--set-address", type=int, default=None, metavar="N",
+                   help="grava novo endereço Modbus (1..247) e sai")
+    p.add_argument("--set-baud", type=int, default=None,
+                   choices=sorted(BAUD_CODES),
+                   help="grava novo baud (2400/4800/9600) e sai")
+    # --- leitura ---
+    p.add_argument("--raw", action="store_true",
+                   help="mostra apenas valores brutos")
+    p.add_argument("--json", action="store_true", help="saída em JSON")
+    p.add_argument("--watch", action="store_true",
+                   help="leitura contínua (polling); Ctrl+C para parar")
+    p.add_argument("--interval", type=float, default=1.0,
+                   help="intervalo entre leituras no --watch (s, padrão 1.0)")
+    p.add_argument("--samples", type=int, default=1,
+                   help="nº de leituras por valor (bloco); >1 ativa filtro")
+    p.add_argument("--filter", choices=("mean", "median", "trimmed"),
+                   default="mean", help="redutor de bloco (padrão mean)")
+    p.add_argument("--trim", type=float, default=0.1,
+                   help="fração aparada em cada ponta (só p/ --filter trimmed)")
+    p.add_argument("--reject", action="store_true",
+                   help="rejeita outliers (MAD) antes de reduzir")
+    p.add_argument("--reject-k", type=float, default=3.0,
+                   help="limiar da rejeição de outlier, em desvios (padrão 3.0)")
+    p.add_argument("--ewma", type=float, default=None, metavar="ALPHA",
+                   help="suavização contínua EWMA (0<ALPHA<=1); bom com --watch")
+    p.add_argument("--sample-interval", type=float, default=0.0,
+                   help="espera entre as N amostras do bloco (s)")
+    p.add_argument("--stats", action="store_true",
+                   help="mostra desvio-padrão s, incerteza u e n por medição")
+    p.add_argument("--map", action="append", default=[], dest="maps",
+                   metavar="SPEC",
+                   help="escala por medição, repetível (índice 1=umidade, "
+                        "2=temperatura): IDX:IN_MIN:IN_MAX:OUT_MIN:OUT_MAX[:UNI]")
+    p.add_argument("--map-clamp", action="store_true",
+                   help="limita a saída dos maps à faixa de saída")
+    return p
+
+
+def run_config(dev, args):
+    """Executa uma ação de configuração (--show-config/--set-*) e retorna."""
+    if args.set_address is not None:
+        dev.set_address(args.set_address)
+        print(f"Endereço gravado: {args.set_address}. "
+              f"O sensor agora responde nesse novo endereço "
+              f"(reabra a conexão com -a {args.set_address}).")
+        return
+    if args.set_baud is not None:
+        dev.set_baud(args.set_baud)
+        print(f"Baud gravado: {args.set_baud}. O sensor agora comunica nessa "
+              f"nova velocidade (reabra a conexão com -b {args.set_baud}).")
+        return
+    cfg = dev.read_config()
+    baud = cfg["baud"] if cfg["baud"] is not None else f"?(cód {cfg['baud_code']})"
+    print(f"RS-WS-N01-2D — endereço {cfg['address']}, baud {baud}")
+
+
+def render_once(dev, args):
+    """Faz uma leitura e imprime conforme --raw / --json."""
+    if args.raw:
+        raw = dev.read_raw()
+        if args.json:
+            print(json.dumps(raw))
+        else:
+            for i, v in enumerate(raw):
+                name = MEASUREMENTS[i][0]
+                print(f"{name:<12} reg 0x{BASE_REGISTER + i:04X}: "
+                      f"{v}  (0x{v:04X})")
+        return
+
+    measurements = dev.read_measurements(
+        samples=args.samples, method=args.filter, trim=args.trim,
+        reject=args.reject, reject_k=args.reject_k,
+        interval=args.sample_interval, with_stats=args.stats,
+        maps=args._map_specs,
+    )
+    if args.json:
+        print(json.dumps(measurements, ensure_ascii=False))
+    else:
+        print(f"RS-WS-N01-2D @ endereço {args.address} — {args.baud} baud")
+        for m in measurements:
+            line = (f"  {m['name']:<12} reg 0x{m['register']:04X}  "
+                    f"bruto {int(m['raw']):>4}  = {m['value']:>8} {m['unit']}")
+            for phys_key in ("%RH", "°C"):
+                if phys_key in m:
+                    line += f"  ({m[phys_key]} {phys_key})"
+            if "stats" in m:
+                st = m["stats"]
+                line += f"   [n={st['n']} s={st['s']} u={st['u']}]"
+            print(line)
+
+
+def main():
+    args = build_parser().parse_args()
+    try:
+        args._map_specs = [parse_map_arg(s, clamp=args.map_clamp)
+                           for s in args.maps]
+        resolve_maps(args._map_specs)   # valida índice duplicado cedo
+    except ValueError as e:
+        sys.exit(f"Erro no --map: {e}")
+
+    is_config = (args.show_config or args.set_address is not None
+                 or args.set_baud is not None)
+    try:
+        with RSWSN012D(args.port, baud=args.baud, address=args.address,
+                       function=args.function, databits=args.databits,
+                       parity=args.parity, stopbits=args.stopbits,
+                       timeout=args.timeout, ewma_alpha=args.ewma) as dev:
+            if is_config:
+                run_config(dev, args)
+                return
+            if not args.watch:
+                render_once(dev, args)
+                return
+            # Modo polling: relê a cada --interval até Ctrl+C.
+            try:
+                while True:
+                    render_once(dev, args)
+                    if not args.json:
+                        print("-" * 40)
+                    sys.stdout.flush()
+                    time.sleep(args.interval)
+            except KeyboardInterrupt:
+                print("\nInterrompido.", file=sys.stderr)
+    except ValueError as e:
+        sys.exit(f"Erro: {e}")
+    except RuntimeError as e:
+        sys.exit(f"Erro: {e}")
+    except Exception as e:  # serial, etc.
+        sys.exit(f"Erro serial/comunicação: {e}")
+
+
+if __name__ == "__main__":
+    main()
