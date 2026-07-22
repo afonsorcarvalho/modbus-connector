@@ -49,3 +49,9 @@ remediações). Depois: `sudo systemctl restart watchdog`.
 Watchdog mal configurado reinicia a placa. Como o acesso é remoto via VPN,
 teste em momento em que um reboot acidental não seja problema e garanta um
 caminho de recuperação (ex.: acesso físico ou alternativo).
+
+Uma queda de upstream genuinamente persistente faz a placa reiniciar a cada
+~3 min, indefinidamente: o estado fica em tmpfs (`/run/watchdog`) e é perdido
+a cada boot, então o ciclo de "queda → repara → reboot" recomeça do zero.
+É um "keep trying" intencional, mas pesado para o cartão SD — fique de olho
+durante uma queda de upstream prolongada.

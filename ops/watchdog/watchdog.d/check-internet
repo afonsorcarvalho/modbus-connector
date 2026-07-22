@@ -10,7 +10,7 @@ REPAIR_EVERY=60             # re-tenta remediacao no maximo a cada 60s
 
 probe() {
     for t in $TARGETS; do
-        if ping -c 2 -W 2 "$t" >/dev/null 2>&1; then
+        if ping -c 1 -W 2 "$t" >/dev/null 2>&1; then
             return 0
         fi
     done
@@ -18,10 +18,12 @@ probe() {
 }
 
 remediate() {
-    if nmcli device reconnect wlan0 >/dev/null 2>&1; then
-        return 0
-    fi
-    systemctl restart NetworkManager >/dev/null 2>&1
+    # Fire-and-forget: nmcli reconnect can block up to its timeout, and the
+    # watchdog daemon does NOT feed /dev/watchdog while this script runs.
+    # Background the whole thing and redirect ALL fds off the inherited
+    # stdout/stderr so the parent returns immediately (and never holds a pipe).
+    ( timeout 8 nmcli -w 8 device reconnect wlan0 \
+      || systemctl restart --no-block NetworkManager ) </dev/null >/dev/null 2>&1 &
     return 0
 }
 

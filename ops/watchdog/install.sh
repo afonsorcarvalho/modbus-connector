@@ -28,6 +28,12 @@ mkdir -p /var/log/watchdog
 echo ">> Habilitando o servico..."
 systemctl enable --now watchdog
 
+if ! systemctl is-active --quiet watchdog; then
+    echo "ERRO: o servico watchdog nao ficou ativo. Verifique 'journalctl -u watchdog'." >&2
+    exit 1
+fi
+echo ">> Dica: valide o timeout do chip com 'wdctl' antes de confiar no reboot por hardware."
+
 cat <<'EOF'
 >> Pronto.
 SEGURANCA: a partir de agora a placa REINICIA se:

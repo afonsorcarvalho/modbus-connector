@@ -35,6 +35,7 @@ esac
 ''')
         self._shim("nmcli",
                    'echo "nmcli $*" >> "$CALLS"; '
+                   'sleep "${NMCLI_SLEEP:-0}"; '
                    '[ "${NMCLI_OK:-1}" = 1 ] && exit 0 || exit 1')
         self._shim("systemctl", 'echo "systemctl $*" >> "$CALLS"; exit 0')
         self._shim("logger", 'exit 0')
@@ -82,6 +83,21 @@ run_watchdog_check "${1:-test}"
     def state_text(self, track):
         f = self.state_dir / f"{track}.state"
         return f.read_text().strip() if f.exists() else None
+
+    def wait_for_calls(self, needle, timeout=3.0):
+        import time
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if needle in self.calls_text():
+                return True
+            time.sleep(0.02)
+        return False
+
+    def timed_run(self, script, mode="test", now=None, **env):
+        import time
+        start = time.monotonic()
+        r = self.run_script(script, mode, now=now, **env)
+        return r, time.monotonic() - start
 
 
 class EngineTests(WatchdogBase):
@@ -146,18 +162,29 @@ class CheckInternetTests(WatchdogBase):
     def test_repair_reconnects_wifi(self):
         r = self.run_script(self.SCRIPT, "repair", now=1000, INTERNET_OK=0)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("nmcli device reconnect wlan0", self.calls_text())
+        self.assertTrue(self.wait_for_calls("device reconnect wlan0"))
 
     def test_repair_falls_back_to_networkmanager_restart(self):
         r = self.run_script(self.SCRIPT, "repair", now=1000,
                             INTERNET_OK=0, NMCLI_OK=0)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("systemctl restart NetworkManager", self.calls_text())
+        self.assertTrue(self.wait_for_calls("restart --no-block NetworkManager"))
 
     def test_reboot_after_3min(self):
         self.seed_state("internet", 1000, 1000)
         r = self.run_script(self.SCRIPT, "repair", now=1181, INTERNET_OK=0)
         self.assertEqual(r.returncode, 1, r.stderr)
+
+    def test_remediation_is_non_blocking(self):
+        # nmcli shim sleeps 30s; backgrounded remediation must NOT block the
+        # script. The parent must return in well under the watchdog budget.
+        r, elapsed = self.timed_run(self.SCRIPT, "repair", now=1000,
+                                    INTERNET_OK=0, NMCLI_SLEEP=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertLess(elapsed, 5.0,
+                        f"script blocked {elapsed:.1f}s on remediation")
+        # the reconnect was still issued (logged before the shim sleeps)
+        self.assertTrue(self.wait_for_calls("device reconnect wlan0"))
 
 
 class CheckVpnTests(WatchdogBase):
@@ -175,7 +202,7 @@ class CheckVpnTests(WatchdogBase):
         r = self.run_script(self.SCRIPT, "repair", now=1000,
                             VPN_OK=0, INTERNET_OK=1)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("systemctl restart openvpn@client.service",
+        self.assertIn("restart --no-block openvpn@client.service",
                       self.calls_text())
 
     def test_guard_skips_openvpn_when_internet_down(self):

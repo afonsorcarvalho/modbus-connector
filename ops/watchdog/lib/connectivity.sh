@@ -43,8 +43,8 @@ run_watchdog_check() {
                 first_fail="$now"
                 last_repair=0
             fi
-            : "${first_fail:=$now}"
-            : "${last_repair:=0}"
+            case "$first_fail" in ''|*[!0-9]*) first_fail="$now" ;; esac
+            case "$last_repair" in ''|*[!0-9]*) last_repair=0 ;; esac
 
             elapsed=$(( now - first_fail ))
             if [ "$elapsed" -ge "$REBOOT_AFTER" ]; then
