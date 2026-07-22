@@ -78,3 +78,141 @@ def raw_to_humidity(raw):
 def raw_to_temperature(raw):
     """Temperatura em °C. Valor bruto é real ×10, signed (permite negativos)."""
     return to_signed16(raw) / TEMP_SCALE
+
+
+# --------------------------------------------------------------------------- #
+# Driver
+# --------------------------------------------------------------------------- #
+
+class RSWSN012D:
+    """Driver do sensor RS-WS-N01-2D sobre uma linha serial Modbus RTU."""
+
+    def __init__(self, port, baud=4800, address=1, function=3,
+                 databits=8, parity="N", stopbits=1, timeout=0.3,
+                 ewma_alpha=None):
+        self.address = address
+        self.function = function          # 3 = holding (padrão), 4 = input
+        self.ewma_alpha = ewma_alpha      # None = EWMA desligado
+        self._ewma = {}                   # índice -> EWMA (sob demanda)
+        self._ser = open_serial(port, baud, databits, parity, stopbits, timeout)
+
+    # -- baixo nível --------------------------------------------------------- #
+
+    def read_raw(self):
+        """Lê os 2 registradores (umidade, temperatura) e retorna os brutos.
+
+        Lança RuntimeError se o dispositivo não responder ou o frame for inválido.
+        """
+        ok, msg, values = probe(
+            self._ser, self.address, self.function, BASE_REGISTER, NUM_REGISTERS
+        )
+        if not ok or values is None:
+            raise RuntimeError(
+                f"Falha ao ler RS-WS-N01-2D @ addr {self.address}: {msg}")
+        return values
+
+    # -- alto nível ---------------------------------------------------------- #
+
+    def _read_block(self, samples, interval):
+        """Coleta `samples` leituras (2 registradores cada), descartando falhas.
+
+        Relê até completar N ou estourar `samples` falhas (então RuntimeError).
+        """
+        blocks = []
+        failures = 0
+        while len(blocks) < samples:
+            try:
+                blocks.append(self.read_raw())
+            except RuntimeError:
+                failures += 1
+                if failures > samples:
+                    raise
+                continue
+            if interval and len(blocks) < samples:
+                time.sleep(interval)
+        return blocks
+
+    def _physical(self, raw, index):
+        """Converte um bruto no valor físico -> (valor, unidade, nome).
+
+        index 0 = umidade, index 1 = temperatura.
+        """
+        name, unit = MEASUREMENTS[index]
+        if index == 0:
+            return raw_to_humidity(raw), unit, name
+        return raw_to_temperature(raw), unit, name
+
+    def read_measurements(self, samples=1, method="mean", trim=0.1,
+                          reject=False, reject_k=3.0, interval=0.0,
+                          with_stats=False, maps=None):
+        """Lê umidade e temperatura aplicando filtros e (opcional) map.
+
+        Pipeline por medição: bloco -> [rejeita outliers] -> reduz
+        (mean/median/trimmed) -> [EWMA] -> [map]. Com samples=1 e method="mean"
+        o resultado é idêntico à leitura única. `maps` usa índice 1-based
+        (1=umidade, 2=temperatura).
+
+        Cada item: {name, register, raw, value, unit}. Com `maps`, a medição
+        mapeada reporta value/unit na unidade nova e ganha o campo físico
+        ("%RH"/"°C"). Com with_stats=True, ganha stats={n, s, u, min, max}.
+        """
+        channel_maps = resolve_maps(maps) if maps else {}
+        blocks = self._read_block(samples, interval)
+        result = []
+        for i in range(NUM_REGISTERS):
+            col = [b[i] for b in blocks]
+            if reject:
+                col = reject_outliers(col, reject_k)
+            raw_reduced = reduce(col, method, trim) if len(col) > 1 else col[0]
+
+            phys, phys_unit, name = self._physical(raw_reduced, i)
+            if self.ewma_alpha is not None:
+                ewma = self._ewma.get(i)
+                if ewma is None:
+                    ewma = EWMA(self.ewma_alpha)
+                    self._ewma[i] = ewma
+                phys = ewma.update(phys)
+
+            entry = {
+                "name": name,
+                "register": BASE_REGISTER + i,
+                "raw": round(raw_reduced) if samples > 1 else raw_reduced,
+                "value": round(phys, 3),
+                "unit": phys_unit,
+            }
+
+            spec = channel_maps.get(i + 1)   # índice 1-based no --map
+            if spec is not None:
+                entry[phys_unit] = round(phys, 4)      # físico preservado
+                entry["value"] = round(spec.apply(phys), 4)
+                entry["unit"] = spec.unit or "eng"
+
+            if with_stats:
+                phys_samples = [self._physical(r, i)[0] for r in col]
+                st = block_stats(phys_samples)
+                if spec is not None:
+                    slope = abs((spec.out_max - spec.out_min) /
+                                (spec.in_max - spec.in_min))
+                    st = {**st, "s": st["s"] * slope, "u": st["u"] * slope,
+                          "min": spec.apply(st["min"]), "max": spec.apply(st["max"])}
+                entry["stats"] = {
+                    key: (round(v, 5) if isinstance(v, float) else v)
+                    for key, v in st.items() if key in ("n", "s", "u", "min", "max")
+                }
+
+            result.append(entry)
+        return result
+
+    def reset_filters(self):
+        """Zera o estado dos filtros EWMA de todas as medições."""
+        self._ewma.clear()
+
+    def close(self):
+        self._ser.close()
+
+    # suporte a "with RSWSN012D(...) as dev:"
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
