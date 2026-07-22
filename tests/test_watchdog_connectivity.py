@@ -130,3 +130,31 @@ class EngineTests(WatchdogBase):
                             H_REMEDIATE_OK=0)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.state_text("test"), "1000 0")
+
+
+class CheckInternetTests(WatchdogBase):
+    SCRIPT = OPS / "watchdog.d" / "check-internet"
+
+    def test_test_ok_when_internet_up(self):
+        r = self.run_script(self.SCRIPT, "test", INTERNET_OK=1)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_test_fail_when_internet_down(self):
+        r = self.run_script(self.SCRIPT, "test", INTERNET_OK=0)
+        self.assertEqual(r.returncode, 1, r.stderr)
+
+    def test_repair_reconnects_wifi(self):
+        r = self.run_script(self.SCRIPT, "repair", now=1000, INTERNET_OK=0)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("nmcli device reconnect wlan0", self.calls_text())
+
+    def test_repair_falls_back_to_networkmanager_restart(self):
+        r = self.run_script(self.SCRIPT, "repair", now=1000,
+                            INTERNET_OK=0, NMCLI_OK=0)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("systemctl restart NetworkManager", self.calls_text())
+
+    def test_reboot_after_3min(self):
+        self.seed_state("internet", 1000, 1000)
+        r = self.run_script(self.SCRIPT, "repair", now=1181, INTERNET_OK=0)
+        self.assertEqual(r.returncode, 1, r.stderr)

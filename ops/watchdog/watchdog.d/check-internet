@@ -1,0 +1,29 @@
+#!/bin/sh
+# watchdog test/repair da conectividade de internet publica.
+# Pede reboot da placa apos REBOOT_AFTER segundos de falha continua.
+set -u
+
+TRACK="internet"
+TARGETS="8.8.8.8 1.1.1.1"   # sucesso se QUALQUER um responder
+REBOOT_AFTER=180            # 3 minutos
+REPAIR_EVERY=60             # re-tenta remediacao no maximo a cada 60s
+
+probe() {
+    for t in $TARGETS; do
+        if ping -c 2 -W 2 "$t" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+remediate() {
+    if nmcli device reconnect wlan0 >/dev/null 2>&1; then
+        return 0
+    fi
+    systemctl restart NetworkManager >/dev/null 2>&1
+    return 0
+}
+
+. "${WATCHDOG_LIB:-/usr/local/lib/watchdog-connectivity.sh}"
+run_watchdog_check "${1:-test}"
