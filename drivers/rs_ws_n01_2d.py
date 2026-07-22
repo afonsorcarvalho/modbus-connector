@@ -203,6 +203,58 @@ class RSWSN012D:
             result.append(entry)
         return result
 
+    # -- configuração (registradores R/W) ------------------------------------ #
+
+    def _read_config_raw(self):
+        """Lê os 2 registradores de configuração (endereço, código de baud)."""
+        ok, msg, values = probe(
+            self._ser, self.address, self.function, REG_ADDRESS, 2
+        )
+        if not ok or values is None:
+            raise RuntimeError(
+                f"Falha ao ler config @ addr {self.address}: {msg}")
+        return values
+
+    def read_config(self):
+        """Retorna {address, baud_code, baud} do sensor.
+
+        `baud` é resolvido pela tabela BAUD_BY_CODE (None se código desconhecido).
+        """
+        addr, baud_code = self._read_config_raw()
+        return {
+            "address": addr,
+            "baud_code": baud_code,
+            "baud": BAUD_BY_CODE.get(baud_code),
+        }
+
+    def _write_register(self, reg, value):
+        """Escreve um registrador via FC06 e valida o eco da resposta.
+
+        FC06 responde ecoando a requisição (8 bytes). RuntimeError se divergir.
+        """
+        body = bytes([self.address, 0x06,
+                      (reg >> 8) & 0xFF, reg & 0xFF,
+                      (value >> 8) & 0xFF, value & 0xFF])
+        request = body + crc16(body)
+        resp = transaction(self._ser, request, len(request))
+        if resp != request:
+            raise RuntimeError(
+                f"Escrita não confirmada no reg 0x{reg:04X}: "
+                f"esperado {request.hex()}, recebido {resp.hex() or '(vazio)'}")
+
+    def set_address(self, new):
+        """Grava um novo endereço Modbus (1..247) no reg 0x07D0."""
+        if not 1 <= new <= 247:
+            raise ValueError(f"endereço fora da faixa 1..247: {new}")
+        self._write_register(REG_ADDRESS, new)
+
+    def set_baud(self, baud):
+        """Grava um novo baud (2400/4800/9600) como código no reg 0x07D1."""
+        if baud not in BAUD_CODES:
+            raise ValueError(
+                f"baud inválido {baud}; use um de {sorted(BAUD_CODES)}")
+        self._write_register(REG_BAUD, BAUD_CODES[baud])
+
     def reset_filters(self):
         """Zera o estado dos filtros EWMA de todas as medições."""
         self._ewma.clear()

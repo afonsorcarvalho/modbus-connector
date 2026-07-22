@@ -3,7 +3,8 @@ from unittest.mock import patch
 
 from drivers.rs_ws_n01_2d import (
     to_signed16, raw_to_humidity, raw_to_temperature, BAUD_CODES,
-    RSWSN012D,
+    RSWSN012D, REG_ADDRESS, REG_BAUD,
+    crc16 as _crc16,
 )
 from common.scaling import parse_map_arg
 
@@ -114,6 +115,95 @@ class TestReadMeasurements(unittest.TestCase):
         self.assertEqual(m[1]["unit"], "degF")
         self.assertAlmostEqual(m[1]["°C"], 24.3)  # físico preservado
         self.assertEqual(m[0]["unit"], "%RH")     # umidade sem map
+
+
+class FakeSerial:
+    """Serial mockada: grava o que foi escrito e devolve uma resposta fixa."""
+    def __init__(self, response=b""):
+        self.written = b""
+        self._response = response
+
+    def set_response(self, resp):
+        self._response = resp
+
+    def reset_input_buffer(self):
+        pass
+
+    def write(self, data):
+        self.written = data
+        return len(data)
+
+    def flush(self):
+        pass
+
+    def read(self, n):
+        resp, self._response = self._response, b""
+        return resp
+
+    def close(self):
+        pass
+
+
+def dev_with_serial(fake, **kwargs):
+    with patch("drivers.rs_ws_n01_2d.open_serial", return_value=fake):
+        return RSWSN012D(port="/dev/null", **kwargs)
+
+
+def fc06_frame(addr, reg, value):
+    body = bytes([addr, 0x06, reg >> 8, reg & 0xFF, value >> 8, value & 0xFF])
+    return body + _crc16(body)
+
+
+class TestConfig(unittest.TestCase):
+    def test_read_config_parses_baud(self):
+        dev = make_dev(address=2)
+        with patch.object(dev, "_read_config_raw", return_value=[2, 2]):
+            cfg = dev.read_config()
+        self.assertEqual(cfg["address"], 2)
+        self.assertEqual(cfg["baud_code"], 2)
+        self.assertEqual(cfg["baud"], 9600)
+
+    def test_read_config_unknown_baud(self):
+        dev = make_dev()
+        with patch.object(dev, "_read_config_raw", return_value=[5, 9]):
+            cfg = dev.read_config()
+        self.assertEqual(cfg["address"], 5)
+        self.assertIsNone(cfg["baud"])
+
+    def test_set_baud_writes_correct_frame(self):
+        fake = FakeSerial()
+        dev = dev_with_serial(fake, address=2)
+        expected = fc06_frame(2, REG_BAUD, 2)  # 9600 -> código 2
+        fake.set_response(expected)
+        dev.set_baud(9600)
+        self.assertEqual(fake.written, expected)
+
+    def test_set_address_writes_correct_frame(self):
+        fake = FakeSerial()
+        dev = dev_with_serial(fake, address=2)
+        expected = fc06_frame(2, REG_ADDRESS, 7)
+        fake.set_response(expected)
+        dev.set_address(7)
+        self.assertEqual(fake.written, expected)
+
+    def test_set_baud_rejects_unknown(self):
+        dev = make_dev()
+        with self.assertRaises(ValueError):
+            dev.set_baud(1200)
+
+    def test_set_address_rejects_out_of_range(self):
+        dev = make_dev()
+        with self.assertRaises(ValueError):
+            dev.set_address(300)
+        with self.assertRaises(ValueError):
+            dev.set_address(0)
+
+    def test_write_register_bad_echo_raises(self):
+        fake = FakeSerial()
+        dev = dev_with_serial(fake, address=2)
+        fake.set_response(b"\x02\x06\x00\x00\x00\x00\x00\x00")  # eco errado
+        with self.assertRaises(RuntimeError):
+            dev.set_address(7)
 
 
 if __name__ == "__main__":
