@@ -158,3 +158,36 @@ class CheckInternetTests(WatchdogBase):
         self.seed_state("internet", 1000, 1000)
         r = self.run_script(self.SCRIPT, "repair", now=1181, INTERNET_OK=0)
         self.assertEqual(r.returncode, 1, r.stderr)
+
+
+class CheckVpnTests(WatchdogBase):
+    SCRIPT = OPS / "watchdog.d" / "check-vpn"
+
+    def test_test_ok_when_vpn_up(self):
+        r = self.run_script(self.SCRIPT, "test", VPN_OK=1)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_test_fail_when_vpn_down(self):
+        r = self.run_script(self.SCRIPT, "test", VPN_OK=0)
+        self.assertEqual(r.returncode, 1, r.stderr)
+
+    def test_repair_restarts_openvpn_when_internet_up(self):
+        r = self.run_script(self.SCRIPT, "repair", now=1000,
+                            VPN_OK=0, INTERNET_OK=1)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("systemctl restart openvpn@client.service",
+                      self.calls_text())
+
+    def test_guard_skips_openvpn_when_internet_down(self):
+        r = self.run_script(self.SCRIPT, "repair", now=1000,
+                            VPN_OK=0, INTERNET_OK=0)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("openvpn", self.calls_text())
+        # remediacao pulada -> last_repair permanece 0
+        self.assertEqual(self.state_text("vpn"), "1000 0")
+
+    def test_reboot_after_10min(self):
+        self.seed_state("vpn", 1000, 1000)
+        r = self.run_script(self.SCRIPT, "repair", now=1601,
+                            VPN_OK=0, INTERNET_OK=1)
+        self.assertEqual(r.returncode, 1, r.stderr)

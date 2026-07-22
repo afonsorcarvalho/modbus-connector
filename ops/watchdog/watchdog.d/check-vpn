@@ -1,0 +1,36 @@
+#!/bin/sh
+# watchdog test/repair da conectividade do tunel OpenVPN.
+# Pede reboot da placa apos REBOOT_AFTER segundos de falha continua.
+set -u
+
+TRACK="vpn"
+TARGET="10.8.0.1"
+REBOOT_AFTER=600            # 10 minutos
+REPAIR_EVERY=120           # re-tenta remediacao no maximo a cada 120s
+INTERNET_TARGETS="8.8.8.8 1.1.1.1"
+
+probe() {
+    ping -c 2 -W 2 "$TARGET" >/dev/null 2>&1
+}
+
+_internet_up() {
+    for t in $INTERNET_TARGETS; do
+        if ping -c 1 -W 2 "$t" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+remediate() {
+    # Guarda: se a internet tambem caiu, a trilha de internet e dona da
+    # recuperacao. Reiniciar o tunel sobre link morto e inutil - so contar.
+    if ! _internet_up; then
+        return 1
+    fi
+    systemctl restart openvpn@client.service >/dev/null 2>&1
+    return 0
+}
+
+. "${WATCHDOG_LIB:-/usr/local/lib/watchdog-connectivity.sh}"
+run_watchdog_check "${1:-test}"
