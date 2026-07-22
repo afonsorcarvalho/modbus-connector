@@ -28,6 +28,7 @@ enquadramento, re-sincronização) é implementado direto sobre a serial.
 - [Parte 2 — os drivers (`drivers/`)](#parte-2--os-drivers-drivers)
   - [Driver N4AIB16 — CLI](#driver-n4aib16--cli)
   - [Driver N4AIB16 — como biblioteca](#driver-n4aib16--como-biblioteca)
+  - [Driver RS-WS-N01-2D (temperatura/umidade)](#driver-rs-ws-n01-2d-temperaturaumidade)
 - [Fluxo recomendado](#fluxo-recomendado-do-zero-ao-valor-lido)
 - [Solução de problemas](#solução-de-problemas)
 - [Licença](#licença)
@@ -166,9 +167,11 @@ mapa de registradores, tipo de cada canal e conversão para grandeza física.
 
 ```
 drivers/
-├── __init__.py            # expõe os drivers como pacote
-├── n4aib16.py             # driver do conversor N4AIB16
-└── MANUAL_N4AIB16.md      # manual dos registradores do N4AIB16
+├── __init__.py               # expõe os drivers como pacote
+├── n4aib16.py                # driver do conversor N4AIB16
+├── MANUAL_N4AIB16.md         # manual dos registradores do N4AIB16
+├── rs_ws_n01_2d.py           # driver do sensor de temp/umidade RS-WS-N01-2D
+└── MANUAL_RS_WS_N01_2D.md    # manual dos registradores do RS-WS-N01-2D
 ```
 
 📖 O mapa completo de registradores do N4AIB16 está em
@@ -293,6 +296,50 @@ with N4AIB16(port="/dev/ttyUSB0", baud=9600, address=1) as dev:
 **Calibração:** as constantes `ADC_FULL_SCALE`, `CURRENT_FS_MA` e `VOLTAGE_FS_V`
 estão no topo de [`drivers/n4aib16.py`](./drivers/n4aib16.py). Ajuste-as se a
 leitura real do seu módulo divergir da conversão padrão.
+
+---
+
+## Driver RS-WS-N01-2D (temperatura/umidade)
+
+Sensor industrial de **temperatura + umidade** com LCD, RS-485/Modbus RTU.
+Leitura por **FC03** (2 registradores: umidade `0x0000`, temperatura `0x0001`,
+ambos valor real ×10; a temperatura é *signed*, permitindo negativos). Também lê
+e grava os registradores de **configuração** de endereço (`0x07D0`) e baud
+(`0x07D1`, código `{2400:0, 4800:1, 9600:2}`) via **FC06**.
+
+📖 Mapa completo e mais exemplos em
+[`drivers/MANUAL_RS_WS_N01_2D.md`](./drivers/MANUAL_RS_WS_N01_2D.md).
+
+**CLI:**
+```bash
+# leitura (padrão de fábrica: 4800 baud, endereço 1)
+python drivers/rs_ws_n01_2d.py -p /dev/ttyUSB1 -a 2 -b 9600
+# RS-WS-N01-2D @ endereço 2 — 9600 baud
+#   humidity     reg 0x0000  bruto  508  =     50.8 %RH
+#   temperature  reg 0x0001  bruto  259  =     25.9 °C
+
+# leitura contínua com suavização EWMA e saída JSON
+python drivers/rs_ws_n01_2d.py -p /dev/ttyUSB1 -a 2 -b 9600 --watch --ewma 0.3
+python drivers/rs_ws_n01_2d.py -p /dev/ttyUSB1 -a 2 -b 9600 --json
+
+# configuração: mostrar / trocar endereço / trocar baud (executa e sai)
+python drivers/rs_ws_n01_2d.py -p /dev/ttyUSB1 -a 2 -b 9600 --show-config
+python drivers/rs_ws_n01_2d.py -p /dev/ttyUSB1 -a 2 -b 9600 --set-baud 4800
+```
+
+As flags de filtro/escala (`--samples`, `--filter`, `--reject`, `--ewma`,
+`--stats`, `--map`) são as mesmas do N4AIB16; no `--map` o índice **1=umidade,
+2=temperatura**.
+
+**Como biblioteca:**
+```python
+from drivers.rs_ws_n01_2d import RSWSN012D
+
+with RSWSN012D(port="/dev/ttyUSB1", baud=9600, address=2) as dev:
+    for m in dev.read_measurements():
+        print(f"{m['name']}: {m['value']} {m['unit']}")
+    print(dev.read_config())   # {'address': 2, 'baud_code': 2, 'baud': 9600}
+```
 
 ---
 
