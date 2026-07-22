@@ -191,3 +191,25 @@ class CheckVpnTests(WatchdogBase):
         r = self.run_script(self.SCRIPT, "repair", now=1601,
                             VPN_OK=0, INTERNET_OK=1)
         self.assertEqual(r.returncode, 1, r.stderr)
+
+
+class PackagingTests(unittest.TestCase):
+    def test_shell_syntax_valid(self):
+        for rel in ["lib/connectivity.sh", "watchdog.d/check-internet",
+                    "watchdog.d/check-vpn", "install.sh", "uninstall.sh"]:
+            p = OPS / rel
+            r = subprocess.run(["/bin/sh", "-n", str(p)],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, f"{rel}: {r.stderr}")
+
+    def test_watchdog_conf_has_required_keys(self):
+        conf = (OPS / "watchdog.conf").read_text()
+        for needle in ["watchdog-device", "watchdog-timeout", "interval",
+                       "test-directory", "/etc/watchdog.d",
+                       "test-timeout", "repair-timeout"]:
+            self.assertIn(needle, conf, f"faltou {needle!r} no watchdog.conf")
+
+    def test_check_scripts_are_executable_in_repo(self):
+        for rel in ["watchdog.d/check-internet", "watchdog.d/check-vpn"]:
+            p = OPS / rel
+            self.assertTrue(os.access(p, os.X_OK), f"{rel} nao e executavel")
